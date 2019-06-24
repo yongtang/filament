@@ -27,6 +27,8 @@
 #include <ibl/Image.h>
 
 #include <utils/Panic.h>
+#include <utils/Profiler.h>
+#include <utils/Systrace.h>
 
 namespace filament {
 
@@ -355,6 +357,14 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
     using namespace ibl;
     using namespace backend;
     using namespace math;
+    using namespace utils;
+
+    Profiler profiler;
+    profiler.resetEvents(Profiler::EV_CPU_CYCLES | Profiler::EV_L1D_RATES  | Profiler::EV_BPU_RATES);
+    profiler.start();
+
+    {
+    SYSTRACE_CALL();
 
     const size_t size = getWidth();
     const size_t stride = buffer.stride ? buffer.stride : size;
@@ -376,7 +386,7 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
 
     /* validate texture */
 
-    if (!ASSERT_PRECONDITION_NON_FATAL(!(size & (size-1)),
+    if (!ASSERT_PRECONDITION_NON_FATAL(!(size & (size - 1)),
             "input data cubemap dimensions must be a power-of-two")) {
         return;
     }
@@ -417,6 +427,8 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
 
     Image temp;
     Cubemap cml = CubemapUtils::create(temp, size);
+    {
+    SYSTRACE_NAME("conversion");
     for (size_t j = 0; j < 6; j++) {
         Cubemap::Face face = (Cubemap::Face)j;
         Image const& image = cml.getImageForFace(face);
@@ -424,23 +436,26 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
             Cubemap::Texel* out = (Cubemap::Texel*)image.getPixelRef(0, y);
             if (buffer.type == PixelDataType::FLOAT) {
                 float3 const* src = reinterpret_cast<float3 const*>(
-                                            static_cast<char const*>(buffer.buffer) + faceOffsets[j]) + y * stride;
+                                            static_cast<char const*>(buffer.buffer)
+                                            + faceOffsets[j]) + y * stride;
                 for (size_t x = 0; x < size; x++, out++, src++) {
                     Cubemap::writeAt(out, *src);
                 }
             } else if (buffer.type == PixelDataType::HALF) {
                 half3 const* src = reinterpret_cast<half3 const*>(
-                                           static_cast<char const*>(buffer.buffer) + faceOffsets[j]) + y * stride;
+                                           static_cast<char const*>(buffer.buffer)
+                                           + faceOffsets[j]) + y * stride;
                 for (size_t x = 0; x < size; x++, out++, src++) {
                     Cubemap::writeAt(out, *src);
                 }
             } else if (buffer.type == PixelDataType::UINT_10F_11F_11F_REV) {
                 uint32_t const* src = reinterpret_cast<uint32_t const*>(
-                                              static_cast<char const*>(buffer.buffer) + faceOffsets[j]) + y * stride;
+                                              static_cast<char const*>(buffer.buffer)
+                                              + faceOffsets[j]) + y * stride;
                 for (size_t x = 0; x < size; x++, out++, src++) {
                     using fp10 = math::fp<0, 5, 5>;
                     using fp11 = math::fp<0, 5, 6>;
-                    fp11 r{ uint16_t( *src         & 0x7FFu) };
+                    fp11 r{ uint16_t(*src & 0x7FFu) };
                     fp11 g{ uint16_t((*src >> 11u) & 0x7FFu) };
                     fp10 b{ uint16_t((*src >> 22u) & 0x3FFu) };
                     Cubemap::Texel texel{ fp11::tof(r), fp11::tof(g), fp10::tof(b) };
@@ -448,6 +463,7 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
                 }
             }
         }
+    }
     }
 
     /*
@@ -467,14 +483,22 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
     // make the cubemap seamless
     levels[0].makeSeamless();
 
+    {
+    SYSTRACE_NAME("generateMipmaps");
     // Now generate all the mipmap levels
     generateMipmaps(js, levels, images);
+    }
+
+    {
+    SYSTRACE_NAME("roughnessFilter");
 
     // Finally generate each pre-filtered mipmap level
     const size_t baseExp = utils::ctz(size);
     size_t numSamples = options->sampleCount;
     const size_t numLevels = baseExp + 1;
     for (ssize_t i = baseExp; i >= 0; --i) {
+        SYSTRACE_NAME("level loop");
+
         const size_t dim = 1U << i;
         const size_t level = baseExp - i;
         const float lod = saturate(level / (numLevels - 1.0));
@@ -482,11 +506,16 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
 
         Image image;
         Cubemap dst = CubemapUtils::create(image, dim);
+
+        {
+        SYSTRACE_NAME("CubemapIBL::roughnessFilter");
         CubemapIBL::roughnessFilter(js, dst, levels, linearRoughness, numSamples, mirror);
+        }
 
         Texture::PixelBufferDescriptor pbd(image.getData(), image.getSize(),
                 Texture::PixelBufferDescriptor::PixelDataFormat::RGB,
-                Texture::PixelBufferDescriptor::PixelDataType::FLOAT, 1, 0, 0, image.getStride());
+                Texture::PixelBufferDescriptor::PixelDataType::FLOAT, 1, 0, 0,
+                image.getStride());
 
         uintptr_t base = uintptr_t(image.getData());
         backend::FaceOffsets offsets{};
@@ -500,9 +529,24 @@ void FTexture::generatePrefilterMipmap(FEngine& engine,
         // enqueue a commands that holds the image data until it's executed
         driver.queueCommand(make_copyable_function([data = image.detach()]() {}));
     }
-
+    }
     // no need to call the user callback because buffer is a reference and it'll be destroyed
     // by the caller (without being move()d here).
+    }
+
+
+    UTILS_UNUSED Profiler::Counters counters = profiler.readCounters();
+    slog.d << "GLThread (I)       : " << counters.getInstructions() << io::endl;
+    slog.d << "GLThread (C)       : " << counters.getCpuCycles() << io::endl;
+    slog.d << "GLThread (CPI x10) : " << counters.getCPI() * 10 << io::endl;
+    slog.d << "GLThread (L1D HR%) : " << counters.getL1DHitRate() * 100 << io::endl;
+    if (profiler.hasBranchRates()) {
+        slog.d << "GLThread (BHR%)     : " << counters.getBranchHitRate() * 100 << io::endl;
+    } else {
+        slog.d << "GLThread (BPU miss) : " << counters.getBranchMisses() << io::endl;
+    }
+
+
 }
 
 

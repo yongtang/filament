@@ -29,6 +29,7 @@ import java.io.InputStreamReader
 import java.nio.ByteBuffer
 
 import kotlin.math.log2
+import kotlin.system.measureNanoTime
 
 data class Ibl(val indirectLight: IndirectLight,
                val indirectLightTexture: Texture,
@@ -69,9 +70,10 @@ private fun loadIndirectLight(
             .sampler(Texture.Sampler.SAMPLER_CUBEMAP)
             .build(engine)
 
-    repeat(texture.levels) {
-        loadCubemap(texture, assets, name, engine, "m${it}_", it)
-    }
+//    repeat(texture.levels) {
+//        loadCubemap(texture, assets, name, engine, "m${it}_", it)
+//    }
+    filterCubemap(texture, assets, name, engine, "m0_")
 
     val sphericalHarmonics = loadSphericalHarmonics(assets, name)
 
@@ -144,4 +146,38 @@ private fun loadCubemap(texture: Texture,
     val buffer = Texture.PixelBufferDescriptor(storage,
             Texture.Format.RGB, Texture.Type.UINT_10F_11F_11F_REV)
     texture.setImage(engine, level, buffer, offsets)
+}
+
+private fun filterCubemap(texture: Texture,
+                        assets: AssetManager,
+                        name: String,
+                        engine: Engine,
+                        prefix: String) {
+    // This is important, the alpha channel does not encode opacity but some
+    // of the bits of an R11G11B10F image to represent HDR data. We must tell
+    // Android to not premultiply the RGB channels by the alpha channel
+    val opts = BitmapFactory.Options().apply { inPremultiplied = false }
+
+    // R11G11B10F is always 4 bytes per pixel
+    val faceSize = texture.getWidth(0) * texture.getHeight(0) * 4
+    val offsets = IntArray(6) { it * faceSize }
+    // Allocate enough memory for all the cubemap faces
+    val storage = ByteBuffer.allocateDirect(faceSize * 6)
+
+    arrayOf("px", "nx", "py", "ny", "pz", "nz").forEach { suffix ->
+        assets.open("$name/$prefix$suffix.rgb32f").use {
+            val bitmap = BitmapFactory.decodeStream(it, null, opts)
+            bitmap?.copyPixelsToBuffer(storage)
+        }
+    }
+
+    // Rewind the texture buffer
+    storage.flip()
+
+    val buffer = Texture.PixelBufferDescriptor(storage,
+            Texture.Format.RGB, Texture.Type.UINT_10F_11F_11F_REV)
+    val time = measureNanoTime {
+        texture.generatePrefilterMipmap(engine, buffer, offsets, null);
+    }
+    android.util.Log.d("Filament", "IBL prefilter = ${time.toFloat() / 1_000_000.0f}")
 }

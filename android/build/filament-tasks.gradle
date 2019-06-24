@@ -149,14 +149,14 @@ class IblGenerator extends DefaultTask {
                 standardOutput out
                 errorOutput err
                 executable "${cmgenPath}"
-                args('-x', outputDir, file)
+                args('-s16', '-d', '-x', outputDir, file)
             }
 
             project.exec {
                 standardOutput out
                 errorOutput err
                 executable "${cmgenPath}"
-                args('--format=rgb32f', '--extract-blur=0.08', "--extract=${outputDir.absolutePath}", file)
+                args('-s16', '--format=rgb32f', '--extract-blur=0.08', "--extract=${outputDir.absolutePath}", file)
             }
         }
 
