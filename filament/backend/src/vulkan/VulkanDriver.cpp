@@ -697,20 +697,35 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassP
 
     if (rt->isOffscreen()) {
 
-        // If we're discarding the contents of the color buffer after the render pass, it's safe to
+        // If we're discarding the contents of an attachment after the render pass, it's safe to
         // assume that we will not be sampling from it.
+
         finalColorLayout = any(params.flags.discardEnd & TargetBufferFlags::COLOR) ?
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        finalDepthLayout = VK_IMAGE_LAYOUT_GENERAL;
+        finalDepthLayout = any(params.flags.discardEnd & TargetBufferFlags::DEPTH) ?
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL :
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     } else {
         finalColorLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         finalDepthLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
 
+    VkImageLayout startColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkImageLayout startDepthLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+
+    if (params.flags.generalStart & TargetBufferFlags::COLOR) {
+        startColorLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (params.flags.generalStart & TargetBufferFlags::DEPTH) {
+        startDepthLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+
     VkRenderPass renderPass = mFramebufferCache.getRenderPass({
+        .startColorLayout = startColorLayout,
+        .startDepthLayout = startDepthLayout,
         .finalColorLayout = finalColorLayout,
         .finalDepthLayout = finalDepthLayout,
         .colorFormat = color.format,

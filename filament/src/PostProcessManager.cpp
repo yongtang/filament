@@ -389,6 +389,12 @@ FrameGraphId<FrameGraphTexture> PostProcessManager::ssao(FrameGraph& fg, RenderP
                 pipeline.rasterState.depthFunc = RasterState::DepthFunc::G;
                 pipeline.scissor = pInstance->getScissor();
 
+                // SSAO samples from the current depth target so needs the generalized usage flag.
+                // We avoid using Vulkan's subpass feature because (a) we don't necessarily sample
+                // from the current pixel location and (b) we need shader parity with OpenGL.
+                RenderPassParams params = ssao.params;
+                params.generalStart = TargetBufferFlags::DEPTH;
+
                 driver.beginRenderPass(ssao.target, ssao.params);
                 pInstance->use(driver);
                 driver.draw(pipeline, fullScreenRenderPrimitive);

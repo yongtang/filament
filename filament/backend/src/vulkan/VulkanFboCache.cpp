@@ -89,12 +89,12 @@ VkRenderPass VulkanFboCache::getRenderPass(RenderPassKey config) noexcept {
     uint32_t numAttachments = 0;
     VkAttachmentReference colorAttachmentRef = {};
     if (hasColor) {
-        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachmentRef.layout = config.startColorLayout;
         colorAttachmentRef.attachment = numAttachments++;
     }
     VkAttachmentReference depthAttachmentRef = {};
     if (hasDepth) {
-        depthAttachmentRef.layout = VK_IMAGE_LAYOUT_GENERAL;
+        depthAttachmentRef.layout = config.startDepthLayout;
         depthAttachmentRef.attachment = numAttachments++;
     }
     VkSubpassDescription subpass {

@@ -98,10 +98,23 @@ struct Viewport {
 };
 
 struct RenderPassFlags {
-    TargetBufferFlags clear;
+
+    // Clear the given buffer(s) at the start of the pass.
+    TargetBufferFlags clearStart;
+
+    // Discard the given buffer(s) at the start of the pass.
     TargetBufferFlags discardStart;
+
+    // Discard the given buffer(s) at the end of the pass.
+    // If the buffer is not discarded, it becomes sampleable.
     TargetBufferFlags discardEnd;
-    bool ignoreScissor;
+
+    // The "generalized use" flags can signal that an attachment will be sampled from at the same
+    // time that it is used as a render target. Normally this is neither useful nor legal, but in
+    // some cases it makes sense; e.g. depth testing might be enabled while writes are disabled.
+    TargetBufferFlags generalStart : 7;
+
+    bool ignoreScissor : 1;
 };
 
 struct RenderPassParams {

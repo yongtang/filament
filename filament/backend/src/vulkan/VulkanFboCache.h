@@ -38,8 +38,12 @@ public:
     // a VkRenderPass. It is hashed and used as a lookup key. Portions of this are extracted
     // from backend::RenderPassParams.
     struct alignas(8) RenderPassKey {
-        VkImageLayout finalColorLayout;  // 4 bytes
-        VkImageLayout finalDepthLayout;  // 4 bytes
+        VkImageLayout finalColorLayout; // 4 bytes
+        VkImageLayout finalDepthLayout; // 4 bytes
+
+        VkImageLayout startColorLayout; // 4 bytes
+        VkImageLayout startDepthLayout; // 4 bytes
+
         VkFormat colorFormat; // 4 bytes
         VkFormat depthFormat; // 4 bytes
         union {
@@ -51,7 +55,6 @@ public:
             };
             uint32_t value; // 4 bytes
         } flags;
-        uint32_t padding1; // 4 bytes
     };
     struct RenderPassVal {
         VkRenderPass handle;
