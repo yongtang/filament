@@ -6,6 +6,8 @@ A new header is inserted each time a *tag* is created.
 ## Next release
 
 - Add Java / Kotlin bindings for gltfio::Animator.
+- Add Java / Kotlin bindings for geometry::SurfaceOrientation.
+- Fixed panic with gltfio on Android. Clients now need to stop calling Filament#init.
 
 ## v1.4.1
 
