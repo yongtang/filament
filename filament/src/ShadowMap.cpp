@@ -19,7 +19,6 @@
 #include "components/LightManager.h"
 
 #include "details/Engine.h"
-#include "details/ShadowMap.h"
 #include "details/Scene.h"
 #include "details/View.h"
 
@@ -140,9 +139,8 @@ void ShadowMap::prepare(DriverApi& driver, SamplerGroup& sb) noexcept {
         mShadowMapHandle, {
                     .filterMag = SamplerMagFilter::LINEAR,
                     .filterMin = SamplerMinFilter::LINEAR,
-                    .compareFunc = SamplerCompareFunc::LE,
                     .compareMode = SamplerCompareMode::COMPARE_TO_TEXTURE,
-                    .depthStencil = true
+                    .compareFunc = SamplerCompareFunc::LE
             }});
 }
 
@@ -160,14 +158,14 @@ void ShadowMap::render(DriverApi& driver, RenderPass& pass, FView& view) noexcep
 
     // FIXME: in the future this will come from the framegraph
     RenderPassParams params = {};
-    params.flags.clear = (uint8_t)TargetBufferFlags::DEPTH;
+    params.flags.clear = TargetBufferFlags::DEPTH;
     params.flags.discardStart = TargetBufferFlags::DEPTH;
     params.flags.discardEnd = TargetBufferFlags::COLOR_AND_STENCIL;
     params.clearDepth = 1.0;
     params.viewport = viewport;
     // disable scissor for clearing so the whole surface, but set the viewport to the
     // the inset-by-1 rectangle.
-    params.flags.clear |= RenderPassFlags::IGNORE_SCISSOR;
+    params.flags.ignoreScissor = true;
 
     FCamera const& camera = getCamera();
     details::CameraInfo cameraInfo = {
@@ -215,8 +213,8 @@ void ShadowMap::update(
 
     FLightManager::ShadowParams params = lcm.getShadowParams(li);
     mPolygonOffset = {
-            .constant = params.options.polygonOffsetConstant,
-            .slope = params.options.polygonOffsetSlope
+            .slope = params.options.polygonOffsetSlope,
+            .constant = params.options.polygonOffsetConstant
     };
     mat4f projection(camera.cullingProjection);
     if (params.options.shadowFar > 0.0f) {
@@ -237,10 +235,10 @@ void ShadowMap::update(
             .projection = projection,
             .model = camera.model,
             .view = camera.view,
+            .worldOrigin = camera.worldOrigin,
             .zn = camera.zn,
             .zf = camera.zf,
-            .frustum = Frustum(projection * camera.view),
-            .worldOrigin = camera.worldOrigin
+            .frustum = Frustum(projection * camera.view)
     };
 
     // debugging...
@@ -533,7 +531,7 @@ mat4f ShadowMap::applyLISPSM(math::mat4f& Wp,
         float3 const& dir) {
 
     const float LoV = dot(camera.getForwardVector(), dir);
-    const float sinLV = std::sqrt(1.0f - LoV * LoV);
+    const float sinLV = std::sqrt(std::max(0.0f, 1.0f - LoV * LoV));
 
     // Virtual near plane -- the default is 1m, can be changed by the user.
     // The virtual near plane prevents too much resolution to be wasted in the area near the eye
@@ -562,7 +560,8 @@ mat4f ShadowMap::applyLISPSM(math::mat4f& Wp,
 
     mat4f W;
     // see nopt1 below for an explanation about this test
-    if (3.0f * (dzn / (zf - zn)) < 2.0f) {
+    // sinLV is positive since it comes from a square-root
+    if (sinLV > 0 && 3.0f * (dzn / (zf - zn)) < 2.0f) {
         // nopt is the optimal near plane distance of Wp (i.e. distance from P).
 
         // virtual near and far planes

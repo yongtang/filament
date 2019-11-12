@@ -73,11 +73,13 @@ void CommandStream::execute(void* buffer) {
         profiler.start();
     }
 
-    Driver& UTILS_RESTRICT driver = *mDriver;
-    CommandBase* UTILS_RESTRICT base = static_cast<CommandBase*>(buffer);
-    while (UTILS_LIKELY(base)) {
-        base = base->execute(driver);
-    }
+    mDriver->execute([this, buffer]() {
+        Driver& UTILS_RESTRICT driver = *mDriver;
+        CommandBase* UTILS_RESTRICT base = static_cast<CommandBase*>(buffer);
+        while (UTILS_LIKELY(base)) {
+            base = base->execute(driver);
+        }
+    });
 
     if (SYSTRACE_TAG) {
         // we want to remove all this when tracing is completely disabled
@@ -125,9 +127,9 @@ void CommandType<void (Driver::*)(ARGS...)>::Command<METHOD>::log() noexcept  {
 #if DEBUG_COMMAND_STREAM
 #define DECL_DRIVER_API_SYNCHRONOUS(RetType, methodName, paramsDecl, params)
 #define DECL_DRIVER_API(methodName, paramsDecl, params) \
-    template void CommandType<decltype(&Driver::methodName)>::Command<&Driver::methodName>::log();
+    template void CommandType<decltype(&Driver::methodName)>::Command<&Driver::methodName>::log() noexcept;
 #define DECL_DRIVER_API_RETURN(RetType, methodName, paramsDecl, params) \
-    template void CommandType<decltype(&Driver::methodName##R)>::Command<&Driver::methodName##R>::log();
+    template void CommandType<decltype(&Driver::methodName##R)>::Command<&Driver::methodName##R>::log() noexcept;
 #include "private/backend/DriverAPI.inc"
 #endif
 

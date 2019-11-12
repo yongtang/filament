@@ -235,7 +235,8 @@ void VulkanDriver::terminate() {
     mContext.instance = nullptr;
 }
 
-void VulkanDriver::beginFrame(int64_t monotonic_clock_ns, uint32_t frameId) {
+void VulkanDriver::beginFrame(int64_t monotonic_clock_ns, uint32_t frameId,
+        backend::FrameFinishedCallback, void*) {
     // We allow multiple beginFrame / endFrame pairs before commit(), so gracefully return early
     // if the swap chain has already been acquired.
     if (mContext.currentCommands) {
@@ -280,6 +281,10 @@ void VulkanDriver::endFrame(uint32_t frameId) {
 
 void VulkanDriver::flush(int) {
     // Todo: equivalent of glFlush()
+}
+
+void VulkanDriver::finish(int) {
+    // Todo: equivalent of glFinish()
 }
 
 void VulkanDriver::createSamplerGroupR(Handle<HwSamplerGroup> sbh, size_t count) {
@@ -396,7 +401,7 @@ void VulkanDriver::createRenderTargetR(Handle<HwRenderTarget> rth,
     auto colorTexture = color.handle ? handle_cast<VulkanTexture>(mHandleMap, color.handle) : nullptr;
     auto depthTexture = depth.handle ? handle_cast<VulkanTexture>(mHandleMap, depth.handle) : nullptr;
     auto renderTarget = construct_handle<VulkanRenderTarget>(mHandleMap, rth, mContext,
-            width, height, color.level, colorTexture, depthTexture);
+            width, height, color.level, colorTexture, depth.level, depthTexture);
     mDisposer.createDisposable(renderTarget, [this, rth] () {
         destruct_handle<VulkanRenderTarget>(mHandleMap, rth);
     });
@@ -433,6 +438,12 @@ void VulkanDriver::createSwapChainR(Handle<HwSwapChain> sch, void* nativeWindow,
 
     // TODO: move the following line into makeCurrent.
     mContext.currentSurface = &sc;
+}
+
+void VulkanDriver::createSwapChainHeadlessR(Handle<HwSwapChain> sch,
+        uint32_t width, uint32_t height, uint64_t flags) {
+    //auto* swapChain = construct_handle<VulkanSwapChain>(mHandleMap, sch);
+    // TODO: implement headless swapchain
 }
 
 void VulkanDriver::createStreamFromTextureIdR(Handle<HwStream> sh, intptr_t externalTextureId,
@@ -480,6 +491,10 @@ Handle<HwFence> VulkanDriver::createFenceS() noexcept {
 }
 
 Handle<HwSwapChain> VulkanDriver::createSwapChainS() noexcept {
+    return alloc_handle<VulkanSwapChain, HwSwapChain>();
+}
+
+Handle<HwSwapChain> VulkanDriver::createSwapChainHeadlessS() noexcept {
     return alloc_handle<VulkanSwapChain, HwSwapChain>();
 }
 
@@ -673,9 +688,7 @@ void VulkanDriver::updateSamplerGroup(Handle<HwSamplerGroup> sbh,
     *sb->sb = samplerGroup;
 }
 
-void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth,
-        const RenderPassParams& params) {
-
+void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth, const RenderPassParams& params) {
     assert(mContext.currentCommands);
     assert(mContext.currentSurface);
     VulkanSurfaceContext& surface = *mContext.currentSurface;
@@ -689,49 +702,59 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth,
     const auto depth = rt->getDepth();
     const bool hasColor = color.format != VK_FORMAT_UNDEFINED;
     const bool hasDepth = depth.format != VK_FORMAT_UNDEFINED;
-    const bool depthOnly = hasDepth && !hasColor;
 
     mDisposer.acquire(rt, mContext.currentCommands->resources);
     mDisposer.acquire(color.offscreen, mContext.currentCommands->resources);
     mDisposer.acquire(depth.offscreen, mContext.currentCommands->resources);
 
-    VkImageLayout finalLayout;
-    if (!rt->isOffscreen()) {
-        finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    } else if (depthOnly) {
-        finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    VkImageLayout finalColorLayout;
+    VkImageLayout finalDepthLayout;
+
+    if (rt->isOffscreen()) {
+
+        // If we're discarding the contents of the color buffer after the render pass, it's safe to
+        // assume that we will not be sampling from it.
+        finalColorLayout = any(params.flags.discardEnd & TargetBufferFlags::COLOR) ?
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL :
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        finalDepthLayout = VK_IMAGE_LAYOUT_GENERAL;
+
     } else {
-        finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        finalColorLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        finalDepthLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
 
     VkRenderPass renderPass = mFramebufferCache.getRenderPass({
-        .finalLayout = finalLayout,
+        .finalColorLayout = finalColorLayout,
+        .finalDepthLayout = finalDepthLayout,
         .colorFormat = color.format,
         .depthFormat = depth.format,
-        .flags.clear         = params.flags.clear,
-        .flags.discardStart  = (uint8_t)params.flags.discardStart,
-        .flags.discardEnd    = (uint8_t)params.flags.discardEnd,
-        .flags.dependencies  = params.flags.dependencies
+        .flags = {
+            .clear = params.flags.clear,
+            .discardStart = params.flags.discardStart,
+            .discardEnd = params.flags.discardEnd
+        }
     });
     mBinder.bindRenderPass(renderPass);
 
     VulkanFboCache::FboKey fbo { .renderPass = renderPass };
     int numAttachments = 0;
     if (hasColor) {
-      fbo.attachments[numAttachments++] = color.view;
+        fbo.attachments[numAttachments++] = color.view;
     }
     if (hasDepth) {
-      fbo.attachments[numAttachments++] = depth.view;
+        fbo.attachments[numAttachments++] = depth.view;
     }
 
     VkRenderPassBeginInfo renderPassInfo {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = renderPass,
         .framebuffer = mFramebufferCache.getFramebuffer(fbo, extent.width, extent.height),
-        .renderArea.offset.x = params.viewport.left,
-        .renderArea.offset.y = params.viewport.bottom,
-        .renderArea.extent.width = params.viewport.width,
-        .renderArea.extent.height = params.viewport.height,
+        .renderArea = {
+            .offset = {params.viewport.left, params.viewport.bottom},
+            .extent = {params.viewport.width, params.viewport.height}
+        }
     };
 
     rt->transformClientRectToPlatform(&renderPassInfo.renderArea);
@@ -762,8 +785,8 @@ void VulkanDriver::beginRenderPass(Handle<HwRenderTarget> rth,
             .maxDepth = 1.0f
     };
     VkRect2D scissor {
-            .extent = { (uint32_t) viewport.width, (uint32_t) viewport.height },
-            .offset = { std::max(0, (int32_t) viewport.x), std::max(0, (int32_t) viewport.y) }
+            .offset = { std::max(0, (int32_t) viewport.x), std::max(0, (int32_t) viewport.y) },
+            .extent = { (uint32_t) viewport.width, (uint32_t) viewport.height }
     };
 
     mCurrentRenderTarget->transformClientRectToPlatform(&scissor);
@@ -948,6 +971,9 @@ void VulkanDriver::blit(TargetBufferFlags buffers,
             "Destination format is not blittable")) {
         return;
     }
+    if (any(buffers & TargetBufferFlags::DEPTH)) {
+        utils::slog.w << "Depth blits are not yet supported." << utils::io::endl;
+    }
 #endif
 
     const int32_t srcRight = srcRect.left + srcRect.width;
@@ -1087,12 +1113,21 @@ void VulkanDriver::draw(PipelineState pipelineState, Handle<HwRenderPrimitive> r
             VkSampler vksampler = mSamplerCache.getSampler(samplerParams);
             const auto* texture = handle_const_cast<VulkanTexture>(mHandleMap, boundSampler->t);
             mDisposer.acquire(texture, commands->resources);
+
+            // Check that we do not sample from the current color attachment. It's fine to sample
+            // from the current depth attachment when depth writes are disabled, which is useful in
+            // some SSAO implementations.
+            ASSERT_POSTCONDITION_NON_FATAL(
+                    mCurrentRenderTarget->getColor().image != texture->textureImage,
+                    "Attempting to sample color from the current render target");
+
+            VkImageLayout layout = any(texture->usage & TextureUsage::DEPTH_ATTACHMENT) ?
+                        VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
             mBinder.bindSampler(bindingPoint, {
                 .sampler = vksampler,
                 .imageView = texture->imageView,
-                .imageLayout = samplerParams.depthStencil ?
-                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL :
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                .imageLayout = layout
             });
         }
     }
@@ -1106,8 +1141,8 @@ void VulkanDriver::draw(PipelineState pipelineState, Handle<HwRenderPrimitive> r
     const int32_t top = std::min(viewportScissor.bottom + (int32_t)viewportScissor.height,
             (int32_t)(mContext.viewport.y + mContext.viewport.height));
     VkRect2D scissor{
-            .extent = { (uint32_t)right - x, (uint32_t)top - y },
-            .offset = { std::max(0, x), std::max(0, y) }
+            .offset = { std::max(0, x), std::max(0, y) },
+            .extent = { (uint32_t)right - x, (uint32_t)top - y }
     };
     rt->transformClientRectToPlatform(&scissor);
     vkCmdSetScissor(cmdbuffer, 0, 1, &scissor);

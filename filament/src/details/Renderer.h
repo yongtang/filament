@@ -33,6 +33,7 @@
 
 #include <backend/DriverEnums.h>
 #include <backend/Handle.h>
+#include <backend/PresentCallable.h>
 
 #include <utils/compiler.h>
 #include <utils/Allocator.h>
@@ -74,12 +75,16 @@ public:
     void copyFrame(FSwapChain* dstSwapChain, Viewport const& dstViewport,
             Viewport const& srcViewport, CopyFrameFlag flags);
 
-    bool beginFrame(FSwapChain* swapChain);
+    bool beginFrame(FSwapChain* swapChain, backend::FrameFinishedCallback callback, void* user);
     void endFrame();
 
     void resetUserTime();
 
     void readPixels(uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
+            backend::PixelBufferDescriptor&& buffer);
+
+    void readPixels(FRenderTarget* renderTarget,
+            uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
             backend::PixelBufferDescriptor&& buffer);
 
     // Clean-up everything, this is typically called when the client calls Engine::destroyRenderer()
@@ -90,6 +95,10 @@ private:
     using Command = RenderPass::Command;
 
     backend::Handle<backend::HwRenderTarget> getRenderTarget(FView& view) const noexcept;
+
+    void readPixels(backend::Handle<backend::HwRenderTarget> renderTargetHandle,
+            uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
+            backend::PixelBufferDescriptor&& buffer);
 
     RenderPass::CommandTypeFlags getCommandType(View::DepthPrepass prepass) const noexcept;
 

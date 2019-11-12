@@ -123,7 +123,7 @@ void FRenderer::terminate(FEngine& engine) {
     // that all pending commands have been executed (as they could reference data in this
     // instance, e.g. Fences, Callbacks, etc...)
     if (UTILS_HAS_THREADING) {
-        Fence::waitAndDestroy(engine.createFence());
+        Fence::waitAndDestroy(engine.createFence(FFence::Type::SOFT));
         mFrameInfoManager.terminate();
     } else {
         // In single threaded mode, allow recently-created objects (e.g. no-op fences in Skipper)
@@ -337,9 +337,8 @@ void FRenderer::renderJob(ArenaScope& arena, FView& view) {
 
                 data.color = builder.write(builder.read(data.color));
                 data.rt = builder.createRenderTarget("Color Pass Target", {
+                        .attachments = { data.color, data.depth },
                         .samples = msaa,
-                        .attachments.color = data.color,
-                        .attachments.depth = data.depth
                 }, clearFlags);
             },
             [&pass, &ppm, colorPassBegin, colorPassEnd, jobFroxelize, &js, &view]
@@ -446,8 +445,8 @@ void FRenderer::copyFrame(FSwapChain* dstSwapChain, filament::Viewport const& ds
     // Clear color to black if the CLEAR flag is set.
     if (flags & CLEAR) {
         params.clearColor = {0.f, 0.f, 0.f, 1.f};
-        params.flags.clear = (uint8_t)TargetBufferFlags::COLOR;
-        params.flags.clear |= RenderPassFlags::IGNORE_SCISSOR;
+        params.flags.clear = TargetBufferFlags::COLOR;
+        params.flags.ignoreScissor = true;
         params.flags.discardStart = TargetBufferFlags::ALL;
         params.flags.discardEnd = TargetBufferFlags::NONE;
         params.viewport.left = 0;
@@ -476,7 +475,8 @@ void FRenderer::copyFrame(FSwapChain* dstSwapChain, filament::Viewport const& ds
     mSwapChain->makeCurrent(driver);
 }
 
-bool FRenderer::beginFrame(FSwapChain* swapChain) {
+bool FRenderer::beginFrame(FSwapChain* swapChain, backend::FrameFinishedCallback callback,
+        void* user) {
     SYSTRACE_CALL();
 
     assert(swapChain);
@@ -492,14 +492,14 @@ bool FRenderer::beginFrame(FSwapChain* swapChain) {
     FEngine& engine = getEngine();
     FEngine::DriverApi& driver = engine.getDriverApi();
 
-    // NOTE: this makes synchronous calls to the driver
-    driver.updateStreams(&driver);
-
     mSwapChain = swapChain;
     swapChain->makeCurrent(driver);
 
+    // NOTE: this makes synchronous calls to the driver
+    driver.updateStreams(&driver);
+
     int64_t monotonic_clock_ns (std::chrono::steady_clock::now().time_since_epoch().count());
-    driver.beginFrame(monotonic_clock_ns, mFrameId);
+    driver.beginFrame(monotonic_clock_ns, mFrameId, callback, user);
 
     // This need to occur after the backend beginFrame() because some backends need to start
     // a command buffer before creating a fence.
@@ -581,7 +581,18 @@ void FRenderer::endFrame() {
 
 void FRenderer::readPixels(uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
         PixelBufferDescriptor&& buffer) {
+    readPixels(mRenderTarget, xoffset, yoffset, width, height, std::move(buffer));
+}
 
+void FRenderer::readPixels(FRenderTarget* renderTarget,
+        uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
+        backend::PixelBufferDescriptor&& buffer) {
+    readPixels(renderTarget->getHwHandle(), xoffset, yoffset, width, height, std::move(buffer));
+}
+
+void FRenderer::readPixels(Handle<HwRenderTarget> renderTargetHandle,
+        uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
+        backend::PixelBufferDescriptor&& buffer) {
     if (!ASSERT_POSTCONDITION_NON_FATAL(
             buffer.type != PixelDataType::COMPRESSED,
             "buffer.format cannot be COMPRESSED")) {
@@ -613,11 +624,11 @@ void FRenderer::readPixels(uint32_t xoffset, uint32_t yoffset, uint32_t width, u
 
     FEngine& engine = getEngine();
     FEngine::DriverApi& driver = engine.getDriverApi();
-    driver.readPixels(mRenderTarget, xoffset, yoffset, width, height, std::move(buffer));
+    driver.readPixels(renderTargetHandle, xoffset, yoffset, width, height, std::move(buffer));
 }
 
 Handle<HwRenderTarget> FRenderer::getRenderTarget(FView& view) const noexcept {
-    Handle<HwRenderTarget> viewRenderTarget = view.getRenderTarget();
+    Handle<HwRenderTarget> viewRenderTarget = view.getRenderTargetHandle();
     return viewRenderTarget ? viewRenderTarget : mRenderTarget;
 }
 
@@ -657,8 +668,9 @@ void Renderer::render(View const* view) {
     upcast(this)->render(upcast(view));
 }
 
-bool Renderer::beginFrame(SwapChain* swapChain) {
-    return upcast(this)->beginFrame(upcast(swapChain));
+bool Renderer::beginFrame(SwapChain* swapChain, backend::FrameFinishedCallback callback,
+        void* user) {
+    return upcast(this)->beginFrame(upcast(swapChain), callback, user);
 }
 
 void Renderer::copyFrame(SwapChain* dstSwapChain, filament::Viewport const& dstViewport,
@@ -669,6 +681,13 @@ void Renderer::copyFrame(SwapChain* dstSwapChain, filament::Viewport const& dstV
 void Renderer::readPixels(uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
         PixelBufferDescriptor&& buffer) {
     upcast(this)->readPixels(xoffset, yoffset, width, height, std::move(buffer));
+}
+
+void Renderer::readPixels(RenderTarget* renderTarget,
+        uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
+        PixelBufferDescriptor&& buffer) {
+    upcast(this)->readPixels(upcast(renderTarget),
+            xoffset, yoffset, width, height, std::move(buffer));
 }
 
 void Renderer::endFrame() {

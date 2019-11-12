@@ -69,7 +69,7 @@ Stream::Builder& Stream::Builder::height(uint32_t height) noexcept {
 }
 
 Stream* Stream::Builder::build(Engine& engine) {
-
+    FEngine::assertValid(engine, __PRETTY_FUNCTION__);
     if (!ASSERT_PRECONDITION_NON_FATAL(!mImpl->mStream || !mImpl->mExternalTextureId,
             "One and only one of the stream or external texture can be specified")) {
         return nullptr;
@@ -109,7 +109,7 @@ void FStream::setDimensions(uint32_t width, uint32_t height) noexcept {
     // unfortunately, because this call is synchronous, we must make sure the handle has been
     // created first
     if (UTILS_UNLIKELY(!mStreamHandle)) {
-        FFence::waitAndDestroy(mEngine.createFence(Fence::Type::SOFT), Fence::Mode::FLUSH);
+        FFence::waitAndDestroy(mEngine.createFence(FFence::Type::SOFT), Fence::Mode::FLUSH);
     }
     mEngine.getDriverApi().setStreamDimensions(mStreamHandle, mWidth, mHeight);
 }

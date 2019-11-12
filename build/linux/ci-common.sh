@@ -29,7 +29,9 @@ cd ..
 # Steps for GitHub Workflows
 if [[ "$GITHUB_WORKFLOW" ]]; then
     sudo wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+    sudo apt-get update
     sudo apt-get install clang-$GITHUB_CLANG_VERSION libc++-$GITHUB_CLANG_VERSION-dev libc++abi-$GITHUB_CLANG_VERSION-dev
+    sudo apt-get install mesa-common-dev libxi-dev libxxf86vm-dev
 
     sudo update-alternatives --install /usr/bin/cc cc /usr/bin/clang-${GITHUB_CLANG_VERSION} 100
     sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-${GITHUB_CLANG_VERSION} 100
@@ -43,7 +45,8 @@ if [[ "$KOKORO_BUILD_ID" ]]; then
 
     if [[ "$FILAMENT_ANDROID_CI_BUILD" ]]; then
         # Update NDK
-        yes | $ANDROID_HOME/tools/bin/sdkmanager "ndk-bundle" > /dev/null
+        yes | ${ANDROID_HOME}/tools/bin/sdkmanager --update >/dev/null
+        yes | ${ANDROID_HOME}/tools/bin/sdkmanager --licenses >/dev/null
     fi
 
     # Install clang

@@ -35,15 +35,17 @@
 #include "android/ExternalStreamManagerAndroid.h"
 #include "android/VirtualMachineEnv.h"
 
+#include "OpenGLContext.h"
 #include "OpenGLDriverFactory.h"
-#include "gl_headers.h"
 
 #include <android/api-level.h>
 #include <sys/system_properties.h>
 
-// We require filament to be built with a API 21 toolchain, before that, OpenGLES 3.0 didn't exist
-#if __ANDROID_API__ < 21
-#   error "__ANDROID_API__ must be at least 21"
+// We require filament to be built with a API 19 toolchain, before that, OpenGLES 3.0 didn't exist
+// Actually, OpenGL ES 3.0 was added to API 18, but API 19 is the better target and
+// the minimum for Jetpack at the time of this comment.
+#if __ANDROID_API__ < 19
+#   error "__ANDROID_API__ must be at least 19"
 #endif
 
 using namespace utils;
@@ -94,6 +96,14 @@ static void logEglError(const char* name) noexcept {
         default:                        err = "unknown";                break;
     }
     slog.e << name << " failed with " << err << io::endl;
+}
+
+static void clearGlError() noexcept {
+    // clear GL error that may have been set by previous calls
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) {
+        slog.w << "Ignoring pending GL error " << io::hex << error << io::endl;
+    }
 }
 
 class unordered_string_set : public std::unordered_set<std::string> {
@@ -251,7 +261,6 @@ Driver* PlatformEGL::createDriver(void* sharedContext) noexcept {
       }
     }
 
-
     if (!extensions.has("EGL_KHR_no_config_context")) {
         // if we have the EGL_KHR_no_config_context, we don't need to worry about the config
         // when creating the context, otherwise, we must always pick a transparent config.
@@ -289,6 +298,9 @@ Driver* PlatformEGL::createDriver(void* sharedContext) noexcept {
     }
 
     initializeGlExtensions();
+
+    // this is needed with older emulators/API levels on Android
+    clearGlError();
 
     // success!!
     return OpenGLDriverFactory::create(this, sharedContext);
@@ -331,8 +343,10 @@ void PlatformEGL::terminate() noexcept {
 Platform::SwapChain* PlatformEGL::createSwapChain(
         void* nativeWindow, uint64_t& flags) noexcept {
     EGLSurface sur = eglCreateWindowSurface(mEGLDisplay,
-            (flags & backend::SWAP_CHAIN_CONFIG_TRANSPARENT) ? mEGLTransparentConfig : mEGLConfig,
+            (flags & backend::SWAP_CHAIN_CONFIG_TRANSPARENT) ?
+            mEGLTransparentConfig : mEGLConfig,
             (EGLNativeWindowType)nativeWindow, nullptr);
+
     if (UTILS_UNLIKELY(sur == EGL_NO_SURFACE)) {
         logEglError("eglCreateWindowSurface");
         return nullptr;
@@ -346,6 +360,26 @@ Platform::SwapChain* PlatformEGL::createSwapChain(
     //    logEglError("eglSurfaceAttrib(..., EGL_TIMESTAMPS_ANDROID, EGL_TRUE)");
     //    // this is not fatal
     //}
+    return (SwapChain*)sur;
+}
+
+Platform::SwapChain* PlatformEGL::createSwapChain(
+        uint32_t width, uint32_t height, uint64_t& flags) noexcept {
+
+    EGLint attribs[] = {
+            EGL_WIDTH, EGLint(width),
+            EGL_HEIGHT, EGLint(height),
+            EGL_NONE
+    };
+
+    EGLSurface sur = eglCreatePbufferSurface(mEGLDisplay,
+                (flags & backend::SWAP_CHAIN_CONFIG_TRANSPARENT) ?
+                mEGLTransparentConfig : mEGLConfig, attribs);
+
+    if (UTILS_UNLIKELY(sur == EGL_NO_SURFACE)) {
+        logEglError("eglCreatePbufferSurface");
+        return nullptr;
+    }
     return (SwapChain*)sur;
 }
 
@@ -499,7 +533,7 @@ void PlatformEGL::createExternalImageTexture(void* texture) noexcept {
     glGenTextures(1, &t->gl.id);
     if (ext.OES_EGL_image_external_essl3) {
         t->gl.targetIndex = (uint8_t)
-                OpenGLDriver::getIndexForTextureTarget(t->gl.target = GL_TEXTURE_EXTERNAL_OES);
+                OpenGLContext::getIndexForTextureTarget(t->gl.target = GL_TEXTURE_EXTERNAL_OES);
     }
 }
 
@@ -513,7 +547,7 @@ void PlatformEGL::initializeGlExtensions() noexcept {
     GLint n;
     glGetIntegerv(GL_NUM_EXTENSIONS, &n);
     for (GLint i = 0; i < n; ++i) {
-        const char * const extension = (const char*)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        const char * const extension = (const char*) glGetStringi(GL_EXTENSIONS, (GLuint)i);
         glExtensions.insert(extension);
     }
     ext.OES_EGL_image_external_essl3 = glExtensions.has("GL_OES_EGL_image_external_essl3");

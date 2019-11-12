@@ -81,6 +81,7 @@ export class MaterialInstance {
     public setPolygonOffset(scale: number, constant: number): void;
     public setMaskThreshold(threshold: number): void;
     public setDoubleSided(doubleSided: boolean): void;
+    public setCullingMode(mode: CullingMode): void;
 }
 
 export class EntityManager {
@@ -262,6 +263,7 @@ export class Camera {
     public getForwardVector(): float3;
     public getFrustum(): Frustum;
     public setExposure(aperture: number, shutterSpeed: number, sensitivity: number): void;
+    public setExposureDirect(exposure: number): void;
     public getAperture(): number;
     public getShutterSpeed(): number;
     public getSensitivity(): number;
@@ -451,6 +453,13 @@ export enum MinFilter {
     LINEAR_MIPMAP_NEAREST,
     NEAREST_MIPMAP_LINEAR,
     LINEAR_MIPMAP_LINEAR,
+}
+
+export enum CullingMode {
+    NONE,
+    FRONT,
+    BACK,
+    FRONT_AND_BACK,
 }
 
 export enum PixelDataFormat {

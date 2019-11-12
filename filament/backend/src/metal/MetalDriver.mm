@@ -52,7 +52,6 @@ MetalDriver::MetalDriver(backend::MetalPlatform* platform) noexcept
         : DriverBase(new ConcreteDispatcher<MetalDriver>()),
         mPlatform(*platform),
         mContext(new MetalContext) {
-    mContext->driverPool = [[NSAutoreleasePool alloc] init];
     mContext->device = MTLCreateSystemDefaultDevice();
     mContext->commandQueue = [mContext->device newCommandQueue];
     mContext->commandQueue.label = @"Filament";
@@ -73,7 +72,8 @@ MetalDriver::MetalDriver(backend::MetalPlatform* platform) noexcept
 }
 
 MetalDriver::~MetalDriver() noexcept {
-    [mContext->device release];
+    mContext->device = nil;
+    mContext->emptyTexture = nil;
     CFRelease(mContext->textureCache);
     delete mContext->bufferPool;
     delete mContext->blitter;
@@ -89,13 +89,22 @@ void MetalDriver::debugCommand(const char *methodName) {
 }
 #endif
 
-void MetalDriver::beginFrame(int64_t monotonic_clock_ns, uint32_t frameId) {
-    mContext->framePool = [[NSAutoreleasePool alloc] init];
-
+void MetalDriver::beginFrame(int64_t monotonic_clock_ns, uint32_t frameId,
+        backend::FrameFinishedCallback callback, void* user) {
     id<MTLCommandBuffer> commandBuffer = acquireCommandBuffer(mContext);
     [commandBuffer addCompletedHandler:^(id <MTLCommandBuffer> buffer) {
-        mContext->resourceTracker.clearResources(buffer);
+        mContext->resourceTracker.clearResources((__bridge void*) buffer);
     }];
+
+    // If a callback was specified, then the client is responsible for presenting the frame.
+    mContext->frameFinishedCallback = callback;
+    mContext->frameFinishedUserData = user;
+}
+
+void MetalDriver::execute(std::function<void(void)> fn) noexcept {
+    @autoreleasepool {
+        fn();
+    }
 }
 
 void MetalDriver::setPresentationTime(int64_t monotonic_clock_ns) {
@@ -111,15 +120,20 @@ void MetalDriver::endFrame(uint32_t frameId) {
         mContext->currentCommandBuffer = nil;
     }
 
-    // Release resources created during frame execution- like commandBuffer and currentDrawable.
-    [mContext->framePool drain];
     mContext->bufferPool->gc();
+
+    // If we acquired a drawable for this frame, ensure that we release it here.
+    mContext->currentDrawable = nil;
 
     CVMetalTextureCacheFlush(mContext->textureCache, 0);
 }
 
-void MetalDriver::flush(int dummy) {
+void MetalDriver::flush(int) {
+    // TODO: implement flush, equivalent of glFlush() (needed for performance)
+}
 
+void MetalDriver::finish(int) {
+    // TODO: implement finish, equivalent of glFinish() (needed for unit tests)
 }
 
 void MetalDriver::createVertexBufferR(Handle<HwVertexBuffer> vbh, uint8_t bufferCount,
@@ -204,8 +218,13 @@ void MetalDriver::createFenceR(Handle<HwFence> fh, int dummy) {
 }
 
 void MetalDriver::createSwapChainR(Handle<HwSwapChain> sch, void* nativeWindow, uint64_t flags) {
-    auto* metalLayer = (CAMetalLayer*) nativeWindow;
+    auto* metalLayer = (__bridge CAMetalLayer*) nativeWindow;
     construct_handle<MetalSwapChain>(mHandleMap, sch, mContext->device, metalLayer);
+}
+
+void MetalDriver::createSwapChainHeadlessR(Handle<HwSwapChain> sch,
+        uint32_t width, uint32_t height, uint64_t flags) {
+    // TODO: implement headless swapchain
 }
 
 void MetalDriver::createStreamFromTextureIdR(Handle<HwStream>, intptr_t externalTextureId,
@@ -254,6 +273,10 @@ Handle<HwFence> MetalDriver::createFenceS() noexcept {
 }
 
 Handle<HwSwapChain> MetalDriver::createSwapChainS() noexcept {
+    return alloc_handle<MetalSwapChain, HwSwapChain>();
+}
+
+Handle<HwSwapChain> MetalDriver::createSwapChainHeadlessS() noexcept {
     return alloc_handle<MetalSwapChain, HwSwapChain>();
 }
 
@@ -355,8 +378,7 @@ void MetalDriver::terminate() {
     [oneOffBuffer waitUntilCompleted];
 
     mContext->bufferPool->reset();
-    [mContext->commandQueue release];
-    [mContext->driverPool drain];
+    mContext->commandQueue = nil;
 
     MetalExternalImage::shutdown();
     mContext->blitter->shutdown();
@@ -519,19 +541,15 @@ void MetalDriver::setExternalStream(Handle<HwTexture> th, Handle<HwStream> sh) {
 }
 
 void MetalDriver::generateMipmaps(Handle<HwTexture> th) {
-    // @autoreleasepool is used to release the one-off command buffer and encoder in case this work
-    // is done outside a frame.
-    @autoreleasepool {
-        auto tex = handle_cast<MetalTexture>(mHandleMap, th);
-        // Create a one-off command buffer to execute the blit command. Technically, we could re-use
-        // this command buffer for later rendering commands, but we'll just commit it here for
-        // simplicity.
-        id <MTLCommandBuffer> commandBuffer = [mContext->commandQueue commandBuffer];
-        id <MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
-        [blitEncoder generateMipmapsForTexture:tex->texture];
-        [blitEncoder endEncoding];
-        [commandBuffer commit];
-    }
+    auto tex = handle_cast<MetalTexture>(mHandleMap, th);
+    // Create a one-off command buffer to execute the blit command. Technically, we could re-use
+    // this command buffer for later rendering commands, but we'll just commit it here for
+    // simplicity.
+    id <MTLCommandBuffer> commandBuffer = [mContext->commandQueue commandBuffer];
+    id <MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
+    [blitEncoder generateMipmapsForTexture:tex->texture];
+    [blitEncoder endEncoding];
+    [commandBuffer commit];
 }
 
 bool MetalDriver::canGenerateMipmaps() {
@@ -540,11 +558,11 @@ bool MetalDriver::canGenerateMipmaps() {
 
 void MetalDriver::loadUniformBuffer(Handle<HwUniformBuffer> ubh,
         BufferDescriptor&& data) {
-   if (data.size <= 0) {
+    if (data.size <= 0) {
        return;
-   }
+    }
 
-   auto buffer = handle_cast<MetalUniformBuffer>(mHandleMap, ubh);
+    auto buffer = handle_cast<MetalUniformBuffer>(mHandleMap, ubh);
 
     buffer->copyIntoBuffer(data.buffer, data.size);
     scheduleDestroy(std::move(data));
@@ -627,8 +645,9 @@ void MetalDriver::beginRenderPass(Handle<HwRenderTarget> rth,
 void MetalDriver::endRenderPass(int dummy) {
     [mContext->currentCommandEncoder endEncoding];
 
-    // Command encoders are one time use. Set it to nullptr so we don't accidentally use it again.
-    mContext->currentCommandEncoder = nullptr;
+    // Command encoders are one time use. Set it to nil to release the encoder and ensure we don't
+    // accidentally use it again.
+    mContext->currentCommandEncoder = nil;
 }
 
 void MetalDriver::discardSubRenderTargetBuffers(Handle<HwRenderTarget> rth,
@@ -664,7 +683,7 @@ void MetalDriver::makeCurrent(Handle<HwSwapChain> schDraw, Handle<HwSwapChain> s
 }
 
 void MetalDriver::commit(Handle<HwSwapChain> sch) {
-    if (mContext->currentDrawable != nil) {
+    if (mContext->currentDrawable != nil && !mContext->frameFinishedCallback) {
         [mContext->currentCommandBuffer presentDrawable:mContext->currentDrawable];
     }
     [mContext->currentCommandBuffer commit];
@@ -903,6 +922,12 @@ void MetalDriver::draw(backend::PipelineState ps, Handle<HwRenderPrimitive> rph)
             texturesToBind[binding] = metalTexture->externalImage.getMetalTextureForDraw();
         }
 
+        if (!texturesToBind[binding]) {
+            utils::slog.w << "Warning: no texture bound at binding point " << (size_t) binding
+                    << "." << utils::io::endl;
+            texturesToBind[binding] = getOrCreateEmptyTexture(mContext);
+        }
+
         id <MTLSamplerState> samplerState = mContext->samplerStateCache.getOrCreateState(sampler->s);
         samplersToBind[binding] = samplerState;
     });
@@ -935,9 +960,9 @@ void MetalDriver::draw(backend::PipelineState ps, Handle<HwRenderPrimitive> rph)
                                           withRange:bufferRange];
 
     // Bind the zero buffer, used for missing vertex attributes.
-    static const char bytes[4] = { 0 };
+    static const char bytes[16] = { 0 };
     [mContext->currentCommandEncoder setVertexBytes:bytes
-                                             length:4
+                                             length:16
                                             atIndex:(VERTEX_BUFFER_START + ZERO_VERTEX_BUFFER)];
 
     MetalIndexBuffer* indexBuffer = primitive->indexBuffer;

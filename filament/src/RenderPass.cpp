@@ -16,7 +16,6 @@
 
 #include "RenderPass.h"
 
-#include "details/Culler.h"
 #include "details/Material.h"
 #include "details/MaterialInstance.h"
 #include "details/RenderPrimitive.h"
@@ -180,6 +179,7 @@ void RenderPass::recordDriverCommands(FEngine::DriverApi& driver, FScene& scene,
                 // this is always taken the first time
                 mi = info.mi;
                 pipeline.scissor = mi->getScissor();
+                pipeline.rasterState.culling = mi->getCullingMode();
                 *pPipelinePolygonOffset = mi->getPolygonOffset();
                 ma = mi->getMaterial();
                 mi->use(driver);
@@ -201,7 +201,7 @@ void RenderPass::recordDriverCommands(FEngine::DriverApi& driver, FScene& scene,
 UTILS_ALWAYS_INLINE // this function exists only to make the code more readable. we want it inlined.
 inline              // and we don't need it in the compilation unit
 void RenderPass::setupColorCommand(Command& cmdDraw, bool hasDepthPass,
-        FMaterialInstance const* const UTILS_RESTRICT mi) noexcept {
+        FMaterialInstance const* const UTILS_RESTRICT mi, bool inverseFrontFaces) noexcept {
 
     FMaterial const * const UTILS_RESTRICT ma = mi->getMaterial();
     uint8_t variant =
@@ -223,6 +223,7 @@ void RenderPass::setupColorCommand(Command& cmdDraw, bool hasDepthPass,
     bool hasBlending = ma->getRasterState().hasBlending();
     cmdDraw.key = hasBlending ? keyBlending : keyDraw;
     cmdDraw.primitive.rasterState = ma->getRasterState();
+    cmdDraw.primitive.rasterState.inverseFrontFaces = inverseFrontFaces;
     cmdDraw.primitive.mi = mi;
     cmdDraw.primitive.materialVariant.key = variant;
 
@@ -309,12 +310,13 @@ void RenderPass::generateCommandsImpl(uint32_t extraFlags,
     const bool depthFilterAlphaMaskedObjects = bool(extraFlags & CommandTypeFlags::DEPTH_FILTER_ALPHA_MASKED_OBJECTS);
 
     auto const* const UTILS_RESTRICT soaWorldAABBCenter = soa.data<FScene::WORLD_AABB_CENTER>();
+    auto const* const UTILS_RESTRICT soaReversedWinding = soa.data<FScene::REVERSED_WINDING_ORDER>();
     auto const* const UTILS_RESTRICT soaVisibility      = soa.data<FScene::VISIBILITY_STATE>();
     auto const* const UTILS_RESTRICT soaPrimitives      = soa.data<FScene::PRIMITIVES>();
     auto const* const UTILS_RESTRICT soaBonesUbh        = soa.data<FScene::BONES_UBH>();
 
     const bool hasShadowing = renderFlags & HAS_SHADOWING;
-    const bool inverseFrontFaces = renderFlags & HAS_INVERSE_FRONT_FACES;
+    const bool viewInverseFrontFaces = renderFlags & HAS_INVERSE_FRONT_FACES;
 
     Variant materialVariant;
     materialVariant.setDirectionalLighting(renderFlags & HAS_DIRECTIONAL_LIGHT);
@@ -330,7 +332,6 @@ void RenderPass::generateCommandsImpl(uint32_t extraFlags,
     cmdDepth.primitive.rasterState.depthWrite = true;
     cmdDepth.primitive.rasterState.depthFunc = RasterState::DepthFunc::L;
     cmdDepth.primitive.rasterState.alphaToCoverage = false;
-    cmdDepth.primitive.rasterState.inverseFrontFaces = inverseFrontFaces;
 
     for (uint32_t i = range.first; i < range.last; ++i) {
         // Signed distance from camera to object's center. Positive distances are in front of
@@ -363,6 +364,9 @@ void RenderPass::generateCommandsImpl(uint32_t extraFlags,
         distance = -distance;
         const uint32_t distanceBits = reinterpret_cast<uint32_t&>(distance);
 
+        // calculate the per-primitive face winding order inversion
+        const bool inverseFrontFaces = viewInverseFrontFaces ^ soaReversedWinding[i];
+
         cmdColor.key = makeField(soaVisibility[i].priority, PRIORITY_MASK, PRIORITY_SHIFT);
         cmdColor.primitive.index = (uint16_t)i;
         cmdColor.primitive.perRenderableBones = soaBonesUbh[i];
@@ -377,6 +381,7 @@ void RenderPass::generateCommandsImpl(uint32_t extraFlags,
         cmdDepth.primitive.index = (uint16_t)i;
         cmdDepth.primitive.perRenderableBones = soaBonesUbh[i];
         cmdDepth.primitive.materialVariant.setSkinning(soaVisibility[i].skinning || soaVisibility[i].morphing);
+        cmdDepth.primitive.rasterState.inverseFrontFaces = inverseFrontFaces;
 
         const bool shadowCaster = soaVisibility[i].castShadows & hasShadowing;
         const bool writeDepthForShadowCasters = depthContainsShadowCasters & shadowCaster;
@@ -392,9 +397,7 @@ void RenderPass::generateCommandsImpl(uint32_t extraFlags,
             if (colorPass) {
                 cmdColor.primitive.primitiveHandle = primitive.getHwHandle();
                 cmdColor.primitive.materialVariant = materialVariant;
-                RenderPass::setupColorCommand(cmdColor, depthPass, mi);
-                // Inverting front faces applies to all renderables and primitives in the view
-                cmdColor.primitive.rasterState.inverseFrontFaces = inverseFrontFaces;
+                RenderPass::setupColorCommand(cmdColor, depthPass, mi, inverseFrontFaces);
 
                 const bool blendPass = Pass(cmdColor.key & PASS_MASK) == Pass::BLENDED;
                 if (blendPass) {
@@ -460,7 +463,7 @@ void RenderPass::generateCommandsImpl(uint32_t extraFlags,
                         // in each buckets. We use the top 10 bits of the distance, which
                         // bucketizes the depth by its log2 and in 4 linear chunks in each bucket.
                         cmdColor.key &= ~Z_BUCKET_MASK;
-                        cmdColor.key |= makeField(distanceBits >> 22, Z_BUCKET_MASK,
+                        cmdColor.key |= makeField(distanceBits >> 22u, Z_BUCKET_MASK,
                                 Z_BUCKET_SHIFT);
                     }
                     // ...with depth pre-pass, we just sort by materials

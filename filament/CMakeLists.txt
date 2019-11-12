@@ -191,7 +191,8 @@ foreach (mat_src ${MATERIAL_SRCS})
     add_custom_command(
             OUTPUT ${output_path}
             COMMAND matc ${MATC_BASE_FLAGS} -o ${output_path} ${fullname}
-            DEPENDS ${fullname} matc
+            MAIN_DEPENDENCY ${fullname}
+            DEPENDS matc
             COMMENT "Compiling material ${mat_src} to ${output_path}"
     )
     list(APPEND MATERIAL_BINS ${output_path})
@@ -326,13 +327,17 @@ set(LINUX_COMPILER_FLAGS
         -fPIC
 )
 
-set(FILAMENT_WARNINGS
-        -Wextra -Wno-unused-parameter
-        -Wextra-semi -Wnewline-eof -Wdeprecated -Wundef
-        -Wgnu-conditional-omitted-operand
-        -Wweak-vtables -Wnon-virtual-dtor -Wclass-varargs -Wimplicit-fallthrough
-        -Wover-aligned
-)
+if (MSVC_NATIVE)
+    set(FILAMENT_WARNINGS -W0)
+else()
+    set(FILAMENT_WARNINGS
+            -Wextra -Wno-unused-parameter
+            -Wextra-semi -Wnewline-eof -Wdeprecated -Wundef
+            -Wgnu-conditional-omitted-operand
+            -Wweak-vtables -Wnon-virtual-dtor -Wclass-varargs -Wimplicit-fallthrough
+            -Wover-aligned
+    )
+endif()
 
 # clang-cl maps -Wall to -Weverything, which clutters logs with benign -Wc++98-compat warnings
 # Use /W4 instead for clang-cl builds
