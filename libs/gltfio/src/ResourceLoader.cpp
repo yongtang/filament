@@ -50,8 +50,17 @@ static const auto FREE_CALLBACK = [](void* mem, size_t, void*) { free(mem); };
 
 namespace gltfio {
 
+struct TextureCacheEntry {
+    Texture* texture;
+    stbi_uc* texels;
+};
+
 struct ResourceLoader::Impl {
-    tsl::robin_map<std::string, BufferDescriptor> mResourceCache;
+    tsl::robin_map<std::string, BufferDescriptor> mUserCache;
+    tsl::robin_map<const void*, std::unique_ptr<TextureCacheEntry>> mBufTextureCache;
+    tsl::robin_map<std::string, std::unique_ptr<TextureCacheEntry>> mUrlTextureCache;
+    bool mAyncSuccess;
+    JobSystem::Job* mDecodingJob = nullptr;
 };
 
 namespace details {
@@ -102,6 +111,9 @@ ResourceLoader::ResourceLoader(const ResourceConfiguration& config) :
         mPool(new AssetPool), mConfig(config), pImpl(new Impl) {}
 
 ResourceLoader::~ResourceLoader() {
+    if (pImpl->mDecodingJob) {
+        loadResourcesAsyncWait();
+    }
     mPool->onLoaderDestroyed();
     delete pImpl;
 }
@@ -118,7 +130,7 @@ static void importSkinningData(Skin& dstSkin, const cgltf_skin& srcSkin) {
 }
 
 void ResourceLoader::addResourceData(std::string url, BufferDescriptor&& buffer) {
-    pImpl->mResourceCache.emplace(url, std::move(buffer));
+    pImpl->mUserCache.emplace(url, std::move(buffer));
 }
 
 static void convertBytesToShorts(uint16_t* dst, const uint8_t* src, size_t count) {
@@ -134,9 +146,55 @@ static void generateTrivialIndices(uint32_t* dst, size_t numVertices) {
 }
 
 bool ResourceLoader::loadResources(FilamentAsset* asset) {
+    pImpl->mAyncSuccess = true;
+    loadResourcesAsync(asset);
+    return loadResourcesAsyncWait();
+}
+
+bool ResourceLoader::loadResourcesAsyncWait() {
+    JobSystem* js = JobSystem::getJobSystem();
+    js->waitAndRelease(pImpl->mDecodingJob);
+    pImpl->mDecodingJob = nullptr;
+    if (!pImpl->mAyncSuccess) {
+        return false;
+    }
+
+    // Upload all texture data and generate mipmaps.
+
+    auto upload = [](TextureCacheEntry* cacheEntry, Engine& engine) {
+        Texture* texture = cacheEntry->texture;
+        if (texture) {
+            uint8_t* texels = cacheEntry->texels;
+            Texture::PixelBufferDescriptor pbd(texels,
+                    texture->getWidth() * texture->getHeight() * 4,
+                    Texture::Format::RGBA,
+                    Texture::Type::UBYTE,
+                    [] (void* buffer, size_t, void*) { free(buffer); });
+            texture->setImage(engine, 0, std::move(pbd));
+            texture->generateMipmaps(engine);
+            cacheEntry->texture = nullptr;
+        }
+    };
+
+    for (auto& pair : pImpl->mBufTextureCache) {
+        upload(pair.second.get(), *mConfig.engine);
+    }
+    pImpl->mBufTextureCache.clear();
+
+    for (auto& pair : pImpl->mUrlTextureCache) {
+        upload(pair.second.get(), *mConfig.engine);
+    }
+    pImpl->mUrlTextureCache.clear();
+
+    return pImpl->mAyncSuccess;
+}
+
+void ResourceLoader::loadResourcesAsync(FilamentAsset* asset) {
+    pImpl->mAyncSuccess = true;
     FFilamentAsset* fasset = upcast(asset);
     if (fasset->mResourcesLoaded) {
-        return false;
+        pImpl->mAyncSuccess = false;
+        return;
     }
     fasset->mResourcesLoaded = true;
     mPool->addAsset(fasset);
@@ -151,7 +209,8 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
     if (gltf->buffers_count && !gltf->buffers[0].data && !gltf->buffers[0].uri && gltf->bin) {
         if (gltf->bin_size < gltf->buffers[0].size) {
             slog.e << "Bad size." << io::endl;
-            return false;
+            pImpl->mAyncSuccess = false;
+            return;
         }
         gltf->buffers[0].data = (void*) gltf->bin;
     }
@@ -170,22 +229,26 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
                 cgltf_result res = cgltf_load_buffer_base64(&options, gltf->buffers[i].size, comma + 1, &gltf->buffers[i].data);
                 if (res != cgltf_result_success) {
                     slog.e << "Unable to load " << uri << io::endl;
-                    return false;
+                    pImpl->mAyncSuccess = false;
+                    return;
                 }
             } else {
                 slog.e << "Unable to load " << uri << io::endl;
-                return false;
+                pImpl->mAyncSuccess = false;
+                return;
             }
         } else if (strstr(uri, "://") == nullptr) {
-            auto iter = pImpl->mResourceCache.find(uri);
-            if (iter == pImpl->mResourceCache.end()) {
+            auto iter = pImpl->mUserCache.find(uri);
+            if (iter == pImpl->mUserCache.end()) {
                 slog.e << "Unable to load " << uri << io::endl;
-                return false;
+                pImpl->mAyncSuccess = false;
+                return;
             }
             gltf->buffers[i].data = iter->second.buffer;
         } else {
             slog.e << "Unable to load " << uri << io::endl;
-            return false;
+            pImpl->mAyncSuccess = false;
+            return;
         }
     }
 
@@ -195,7 +258,8 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
     cgltf_result result = cgltf_load_buffers(&options, gltf, mConfig.gltfPath.c_str());
     if (result != cgltf_result_success) {
         slog.e << "Unable to load resources." << io::endl;
-        return false;
+        pImpl->mAyncSuccess = false;
+        return;
     }
 
     #endif
@@ -203,7 +267,8 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
     #ifndef NDEBUG
     if (cgltf_validate(gltf) != cgltf_result_success) {
         slog.e << "Failed cgltf validation." << io::endl;
-        return false;
+        pImpl->mAyncSuccess = false;
+        return;
     }
     #endif
 
@@ -277,10 +342,10 @@ bool ResourceLoader::loadResources(FilamentAsset* asset) {
     }
 
     // Finally, load image files and create Filament Textures.
-    return createTextures(fasset);
+    createTextures(fasset);
 }
 
-bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
+void ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
     // Define a simple functor that creates a Filament Texture.
     // TODO: this could be optimized, e.g. do not generate mips if never mipmap-sampled, and use a
     // more compact format when possible.
@@ -299,20 +364,16 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
     // needless re-decoding with a cache of Filament Texture objects composed of two maps, where
     // the map keys are URL strings or source data pointers.
 
-    struct TextureCacheEntry {
-        Texture* texture;
-        stbi_uc* texels;
-    };
-    tsl::robin_map<const void*, std::unique_ptr<TextureCacheEntry>> bufTextureCache;
-    tsl::robin_map<std::string, std::unique_ptr<TextureCacheEntry>> urlTextureCache;
+    auto& bufTextureCache = pImpl->mBufTextureCache;
+    auto& urlTextureCache = pImpl->mUrlTextureCache;
 
     // The following loop does a fair bit of synchronous work but it offloads the actual PNG / JPEG
     // decoding into the job system. Synchronously, it invokes stbi_info() over each image, creates
     // Filament Textures, and updates the above caches. Along the way, it kicks off jobs that
     // perform the decoding.
 
-    utils::JobSystem* js = utils::JobSystem::getJobSystem();
-    utils::JobSystem::Job* parent = js->createJob();
+    JobSystem* js = JobSystem::getJobSystem();
+    JobSystem::Job* parent = pImpl->mDecodingJob = js->createJob();
 
     for (size_t i = 0, n = asset->getTextureBindingCount(); i < n; ++i) {
         const TextureBinding* texbindings = asset->getTextureBindings();
@@ -332,7 +393,7 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
             cacheEntry = (bufTextureCache[sourceData] = std::make_unique<TextureCacheEntry>()).get();
 
             if (stbi_info_from_memory(sourceData, tb.totalSize, &width, &height, &comp)) {
-                utils::JobSystem::Job* decode = utils::jobs::createJob(*js, parent, [=] {
+                JobSystem::Job* decode = jobs::createJob(*js, parent, [=] {
                     int width, height, comp;
                     cacheEntry->texels = stbi_load_from_memory(sourceData, tb.totalSize, &width, &height, &comp, 4);
                 });
@@ -355,11 +416,11 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
         cacheEntry = (urlTextureCache[tb.uri] = std::make_unique<TextureCacheEntry>()).get();
 
         // Check the user-supplied resource cache for this URL, otherwise load it from the file system.
-        auto iter = pImpl->mResourceCache.find(tb.uri);
-        if (iter != pImpl->mResourceCache.end()) {
+        auto iter = pImpl->mUserCache.find(tb.uri);
+        if (iter != pImpl->mUserCache.end()) {
             const uint8_t* sourceData = (const uint8_t*) iter->second.buffer;
             if (stbi_info_from_memory(sourceData, tb.totalSize, &width, &height, &comp)) {
-                utils::JobSystem::Job* decode = utils::jobs::createJob(*js, parent, [=] {
+                JobSystem::Job* decode = jobs::createJob(*js, parent, [=] {
                     int width, height, comp;
                     cacheEntry->texels = stbi_load_from_memory(sourceData, iter->second.size, &width, &height, &comp, 4);
                 });
@@ -368,11 +429,12 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
         } else {
             #if defined(__EMSCRIPTEN__)
                 slog.e << "Unable to load texture: " << tb.uri << io::endl;
-                return false;
+                pImpl->mAyncSuccess = false;
+                return;
             #else
-                utils::Path fullpath = this->mConfig.gltfPath.getParent() + tb.uri;
+                Path fullpath = this->mConfig.gltfPath.getParent() + tb.uri;
                 if (stbi_info(fullpath.c_str(), &width, &height, &comp)) {
-                    utils::JobSystem::Job* decode = utils::jobs::createJob(*js, parent, [=] {
+                    JobSystem::Job* decode = jobs::createJob(*js, parent, [=] {
                         int width, height, comp;
                         cacheEntry->texels = stbi_load(fullpath.c_str(), &width, &height, &comp, 4);
                     });
@@ -385,33 +447,7 @@ bool ResourceLoader::createTextures(details::FFilamentAsset* asset) const {
         tb.materialInstance->setParameter(tb.materialParameter, cacheEntry->texture, tb.sampler);
     }
 
-    js->runAndWait(parent);
-
-    // Upload all texture data and generate mipmaps.
-
-    auto upload = [](TextureCacheEntry* cacheEntry, Engine& engine) {
-        Texture* texture = cacheEntry->texture;
-        if (texture) {
-            uint8_t* texels = cacheEntry->texels;
-            Texture::PixelBufferDescriptor pbd(texels,
-                    texture->getWidth() * texture->getHeight() * 4,
-                    Texture::Format::RGBA,
-                    Texture::Type::UBYTE,
-                    [] (void* buffer, size_t, void*) { free(buffer); });
-            texture->setImage(engine, 0, std::move(pbd));
-            texture->generateMipmaps(engine);
-            cacheEntry->texture = nullptr;
-        }
-    };
-
-    for (auto& pair : bufTextureCache) {
-        upload(pair.second.get(), *mConfig.engine);
-    }
-    for (auto& pair : urlTextureCache) {
-        upload(pair.second.get(), *mConfig.engine);
-    }
-
-    return true;
+    js->runAndRetain(pImpl->mDecodingJob);
 }
 
 void ResourceLoader::applySparseData(FFilamentAsset* asset) const {
