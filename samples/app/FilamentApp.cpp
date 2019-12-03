@@ -351,8 +351,11 @@ void FilamentApp::run(const Config& config, SetupCallback setupCallback,
         }
 
         // Update the position and orientation of the two cameras.
-        window->mMainCamera->setModelMatrix(window->mMainCameraMan.getCameraTransform());
-        window->mDebugCamera->setModelMatrix(window->mDebugCameraMan.getCameraTransform());
+        filament::math::float3 eye, center, up;
+        window->mMainCameraMan->getLookAt(&eye, &center, &up);
+        window->mMainCamera->lookAt(eye, center, up);
+        window->mDebugCameraMan->getLookAt(&eye, &center, &up);
+        window->mDebugCamera->lookAt(eye, center, up);
 
         // Update the cube distortion matrix used for frustum visualization.
         const Camera* lightmapCamera = window->mMainView->getView()->getDirectionalLightCamera();
@@ -516,9 +519,15 @@ FilamentApp::Window::Window(FilamentApp* filamentApp,
     mViews.emplace_back(mUiView = new CView(*mRenderer, "UI View"));
 
     // set-up the camera manipulators
-    double3 at(0, 0, -4);
+    CameraManipulator::Properties props = {
+        .homeTarget = {0, 0, -4},
+        .homeVector = {0, 0, 4},
+    };
+    mMainCameraMan = CameraManipulator::create(camutils::Mode::ORBIT, props);
+    mDebugCameraMan = CameraManipulator::create(camutils::Mode::ORBIT, props);
+
     mMainView->setCamera(mMainCamera);
-    mMainView->setCameraManipulator(&mMainCameraMan);
+    mMainView->setCameraManipulator(mMainCameraMan);
     mUiView->setCamera(mUiCamera);
     if (config.splitView) {
         // Depth view always uses the main camera
@@ -531,15 +540,12 @@ FilamentApp::Window::Window(FilamentApp* filamentApp,
         // Ortho view obviously uses an ortho camera
         mOrthoView->setCamera( (Camera *)mMainView->getView()->getDirectionalLightCamera() );
 
-        mDepthView->setCameraManipulator(&mMainCameraMan);
-        mGodView->setCameraManipulator(&mDebugCameraMan);
+        mDepthView->setCameraManipulator(mMainCameraMan);
+        mGodView->setCameraManipulator(mDebugCameraMan);
     }
 
     // configure the cameras
     configureCamerasForWindow();
-
-    mMainCameraMan.lookAt(at + double3{ 0, 0, 4 }, at);
-    mDebugCameraMan.lookAt(at + double3{ 0, 0, 4 }, at);
 
     mMainCamera->lookAt({4, 0, -4}, {0, 0, -4}, {0, 1, 0});
 }
@@ -552,6 +558,8 @@ FilamentApp::Window::~Window() {
     mFilamentApp->mEngine->destroy(mRenderer);
     mFilamentApp->mEngine->destroy(mSwapChain);
     SDL_DestroyWindow(mWindow);
+    delete mMainCameraMan;
+    delete mDebugCameraMan;
 }
 
 void FilamentApp::Window::mouseDown(int button, ssize_t x, ssize_t y) {
@@ -656,7 +664,7 @@ void FilamentApp::Window::configureCamerasForWindow() {
     mMainCamera->setProjection(45.0, double(w - sidebar) / h, near, far, Camera::Fov::VERTICAL);
     mDebugCamera->setProjection(45.0, double(w) / h, 0.0625, 4096, Camera::Fov::VERTICAL);
     mOrthoCamera->setProjection(Camera::Projection::ORTHO, -3, 3, -3 * ratio, 3 * ratio, near, far);
-    mOrthoCamera->lookAt(at + float3{ 4, 0, 0 }, at);
+    mOrthoCamera->lookAt({ 0, 0, 0 }, {0, 0, -4});
     mUiCamera->setProjection(Camera::Projection::ORTHO,
             0.0, w / dpiScaleX,
             h / dpiScaleY, 0.0,
@@ -693,43 +701,34 @@ void FilamentApp::CView::setViewport(Viewport const& viewport) {
     mViewport = viewport;
     view->setViewport(viewport);
     if (mCameraManipulator) {
-        mCameraManipulator->setViewport(viewport.width, viewport.height);
+        CameraManipulator::Properties props = mCameraManipulator->getProperties();
+        props.viewport[0] = viewport.width;
+        props.viewport[1] = viewport.height;
+        mCameraManipulator->setProperties(props);
     }
 }
 
 void FilamentApp::CView::mouseDown(int button, ssize_t x, ssize_t y) {
-    mLastMousePosition = double2(x, y);
-    if (button == 1) {
-        mMode = Mode::ROTATE;
-    } else if (button == 3) {
-        mMode = Mode::TRACK;
+    if (mCameraManipulator) {
+        mCameraManipulator->grabBegin(x, y, button == 3);
     }
 }
 
 void FilamentApp::CView::mouseUp(ssize_t x, ssize_t y) {
-    mMode = Mode::NONE;
+    if (mCameraManipulator) {
+        mCameraManipulator->grabEnd();
+    }
 }
 
 void FilamentApp::CView::mouseMoved(ssize_t x, ssize_t y) {
     if (mCameraManipulator) {
-        double2 delta = double2(x, y) - mLastMousePosition;
-        mLastMousePosition = double2(x, y);
-        switch (mMode) {
-            case Mode::NONE:
-                break;
-            case Mode::ROTATE:
-                mCameraManipulator->rotate(delta);
-                break;
-            case Mode::TRACK:
-                mCameraManipulator->track(delta);
-                break;
-        }
+        mCameraManipulator->grabUpdate(x, y);
     }
 }
 
 void FilamentApp::CView::mouseWheel(ssize_t x) {
-    if (mCameraManipulator){
-        mCameraManipulator->dolly(x);
+    if (mCameraManipulator) {
+        mCameraManipulator->zoom(0, 0, x);
     }
 }
 
